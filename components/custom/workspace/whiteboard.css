@@ -1,0 +1,6 @@
+.excalidraw .App-menu__left {
+    display: none !important;
+}
+.excalidraw .App-toolbar{
+    display: none !important;
+}
