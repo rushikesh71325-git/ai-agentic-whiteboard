@@ -18,6 +18,8 @@ import {
   Copy,
   Check,
   Layers,
+  RotateCcw,
+  Trash2,
 } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
@@ -100,20 +102,21 @@ export default function AIFloatingSidebar({
   const [loading, setLoading] = useState(false)
   const [aiTextResult, setAiTextResult] = useState<string | null>(null)
   const [detailLevel, setDetailLevel] = useState<"standard" | "enterprise">("enterprise")
+  const [canvasMode, setCanvasMode] = useState<"replace" | "append">("replace")
   const [copiedText, setCopiedText] = useState(false)
   const placeholderIdsRef = useRef<string[]>([])
 
   const getTargetCanvasPosition = (): { x: number; y: number } => {
-    if (!excalidrawApi) {
-      return { x: 100, y: 100 }
+    if (!excalidrawApi || canvasMode === "replace") {
+      return { x: 80, y: 100 }
     }
 
     const elements = excalidrawApi
       .getSceneElements()
-      .filter((element) => !element.isDeleted)
+      .filter((element) => !element.isDeleted && !element.id.startsWith("ai-generation-placeholder"))
 
     if (elements.length === 0) {
-      return { x: 100, y: 100 }
+      return { x: 80, y: 100 }
     }
 
     const maxRight = Math.max(
@@ -135,11 +138,11 @@ export default function AIFloatingSidebar({
       const placeholderElements = convertToExcalidrawElements([
         {
           type: "rectangle",
-          id: "ai-generation-placeholder",
+          id: "ai-generation-placeholder-card",
           x: position.x,
           y: position.y,
           width: 380,
-          height: 200,
+          height: 180,
           backgroundColor: "#f5f3ff",
           strokeColor: "#8b5cf6",
           fillStyle: "solid",
@@ -149,24 +152,26 @@ export default function AIFloatingSidebar({
         },
         {
           type: "text",
+          id: "ai-generation-placeholder-t1",
           x: position.x + 24,
           y: position.y + 30,
-          text: "Generating with Groq AI...",
-          fontSize: 20,
+          text: "Generating with AI...",
+          fontSize: 18,
           strokeColor: "#6d28d9",
         },
         {
           type: "text",
+          id: "ai-generation-placeholder-t2",
           x: position.x + 24,
           y: position.y + 70,
-          text: "Rendering diagram on canvas...",
-          fontSize: 14,
+          text: "Synthesizing diagram & layout...",
+          fontSize: 13,
           strokeColor: "#6b7280",
         },
       ])
 
       placeholderIdsRef.current = placeholderElements.map((el) => el.id)
-      const current = excalidrawApi.getSceneElements()
+      const current = excalidrawApi.getSceneElements().filter((el) => !el.id.startsWith("ai-generation-placeholder"))
       excalidrawApi.updateScene({
         elements: [...current, ...placeholderElements],
       })
@@ -180,16 +185,28 @@ export default function AIFloatingSidebar({
     try {
       const elements = excalidrawApi
         .getSceneElements()
-        .filter(
-          (el) =>
-            el.id !== "ai-generation-placeholder" &&
-            !placeholderIdsRef.current.includes(el.id)
-        )
+        .filter((el) => {
+          if (el.id.startsWith("ai-generation-placeholder")) return false
+          if (placeholderIdsRef.current.includes(el.id)) return false
+          const text = (el as any).text || ""
+          if (text.includes("Generating with") || text.includes("Synthesizing diagram")) return false
+          return true
+        })
       excalidrawApi.updateScene({ elements })
       placeholderIdsRef.current = []
     } catch (e) {
       console.error(e)
     }
+  }
+
+  const handleClearCanvas = () => {
+    if (!excalidrawApi) return
+    excalidrawApi.updateScene({ elements: [] })
+    toast.add({
+      type: "info",
+      title: "Canvas Reset",
+      description: "Whiteboard cleared.",
+    })
   }
 
   const onClickGenerate = async () => {
@@ -257,11 +274,32 @@ export default function AIFloatingSidebar({
 
         const { convertToExcalidrawElements } = await import("@excalidraw/excalidraw")
         const converted = convertToExcalidrawElements(normalizedElements)
-        const currentElements = excalidrawApi.getSceneElements().filter((e) => !e.isDeleted)
+
+        const cleanExisting = excalidrawApi.getSceneElements().filter((e) => {
+          if (e.isDeleted) return false
+          if (e.id.startsWith("ai-generation-placeholder")) return false
+          if (placeholderIdsRef.current.includes(e.id)) return false
+          const text = (e as any).text || ""
+          if (text.includes("Generating with") || text.includes("Synthesizing diagram")) return false
+          return true
+        })
+
+        const finalSceneElements = canvasMode === "replace" ? converted : [...cleanExisting, ...converted]
 
         excalidrawApi.updateScene({
-          elements: [...currentElements, ...converted],
+          elements: finalSceneElements,
         })
+
+        setTimeout(() => {
+          try {
+            excalidrawApi.scrollToContent(converted, {
+              fitToViewport: true,
+              viewportZoomFactor: 0.8,
+            })
+          } catch (e) {
+            console.error(e)
+          }
+        }, 60)
 
         if (result.data?.summary) {
           setAiTextResult(result.data.summary)
@@ -567,6 +605,46 @@ export default function AIFloatingSidebar({
                 }`}
               >
                 Deep / Detailed
+              </button>
+            </div>
+          </div>
+
+          <div className="mb-2.5 flex items-center justify-between">
+            <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+              <RotateCcw className="h-3 w-3 text-indigo-500" /> Canvas Mode
+            </span>
+            <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-800 p-0.5 rounded-lg text-[10px]">
+                <button
+                  type="button"
+                  onClick={() => setCanvasMode("replace")}
+                  className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                    canvasMode === "replace"
+                      ? "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 shadow-xs font-semibold"
+                      : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                  }`}
+                >
+                  Replace
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCanvasMode("append")}
+                  className={`px-2 py-0.5 rounded-md transition cursor-pointer ${
+                    canvasMode === "append"
+                      ? "bg-white dark:bg-slate-900 text-slate-800 dark:text-slate-100 shadow-xs font-semibold"
+                      : "text-slate-500 hover:text-slate-800 dark:hover:text-slate-200"
+                  }`}
+                >
+                  Append
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={handleClearCanvas}
+                title="Clear whiteboard canvas"
+                className="flex items-center gap-1 text-[10px] text-rose-500 hover:text-rose-600 bg-rose-50 dark:bg-rose-950/30 hover:bg-rose-100/60 px-1.5 py-0.5 rounded-md transition cursor-pointer"
+              >
+                <Trash2 className="h-2.5 w-2.5" /> Clear
               </button>
             </div>
           </div>

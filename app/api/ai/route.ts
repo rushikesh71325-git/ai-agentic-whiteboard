@@ -100,7 +100,7 @@ function compileGraphToExcalidraw(
   const colCounts = new Map<number, number>();
   const nodePositions = new Map<
     string,
-    { x: number; y: number; width: number; height: number; strokeColor: string }
+    { x: number; y: number; width: number; height: number; strokeColor: string; column: number; row: number; id: string; label: string }
   >();
 
   const colWidth = 220;
@@ -132,6 +132,10 @@ function compileGraphToExcalidraw(
       width: w,
       height: h,
       strokeColor: palette.stroke,
+      column: col,
+      row,
+      id: n.id,
+      label: n.label,
     });
 
     elements.push({
@@ -170,10 +174,51 @@ function compileGraphToExcalidraw(
     }
   });
 
-  connections.forEach((conn) => {
-    const src = nodePositions.get(conn.from);
-    const tgt = nodePositions.get(conn.to);
-    if (!src || !tgt) return;
+  const normalizedNodeMap = new Map<string, typeof nodePositions extends Map<any, infer V> ? V : never>();
+  nodes.forEach((n) => {
+    const pos = nodePositions.get(n.id);
+    if (!pos) return;
+    normalizedNodeMap.set(n.id.toLowerCase().trim(), pos);
+    normalizedNodeMap.set(n.id.toLowerCase().replace(/[^a-z0-9]/g, ""), pos);
+    normalizedNodeMap.set(n.label.toLowerCase().trim(), pos);
+    normalizedNodeMap.set(n.label.toLowerCase().replace(/[^a-z0-9]/g, ""), pos);
+  });
+
+  const findNode = (ref: string) => {
+    if (!ref) return undefined;
+    if (nodePositions.has(ref)) return nodePositions.get(ref);
+    const direct = normalizedNodeMap.get(ref.toLowerCase().trim());
+    if (direct) return direct;
+    const stripped = ref.toLowerCase().replace(/[^a-z0-9]/g, "");
+    if (normalizedNodeMap.has(stripped)) return normalizedNodeMap.get(stripped);
+    for (const [key, val] of normalizedNodeMap.entries()) {
+      if (key.length > 3 && (key.includes(stripped) || stripped.includes(key))) {
+        return val;
+      }
+    }
+    return undefined;
+  };
+
+  const incomingCounts: Record<string, number> = {};
+  const outgoingCounts: Record<string, number> = {};
+  nodes.forEach((n) => {
+    incomingCounts[n.id] = 0;
+    outgoingCounts[n.id] = 0;
+  });
+
+  const drawnPairs = new Set<string>();
+
+  const renderArrow = (
+    src: NonNullable<ReturnType<typeof findNode>>,
+    tgt: NonNullable<ReturnType<typeof findNode>>,
+    label?: string
+  ) => {
+    const pairKey = `${src.id}->${tgt.id}`;
+    if (drawnPairs.has(pairKey)) return;
+    drawnPairs.add(pairKey);
+
+    incomingCounts[tgt.id] = (incomingCounts[tgt.id] || 0) + 1;
+    outgoingCounts[src.id] = (outgoingCounts[src.id] || 0) + 1;
 
     let sX: number, sY: number, eX: number, eY: number;
 
@@ -206,27 +251,79 @@ function compileGraphToExcalidraw(
       type: "arrow",
       x: sX,
       y: sY,
-      width: Math.abs(dx),
-      height: Math.abs(dy),
+      width: Math.max(Math.abs(dx), 2),
+      height: Math.max(Math.abs(dy), 2),
       points: [[0, 0], [dx, dy]],
       strokeColor: src.strokeColor || "#6366f1",
       strokeWidth: 2,
       roughness: 0,
     });
 
-    if (conn.label) {
-      const midX = sX + Math.floor(dx / 2) - Math.floor(conn.label.length * 3.2);
+    if (label) {
+      const midX = sX + Math.floor(dx / 2) - Math.floor(label.length * 3.2);
       const midY = sY + Math.floor(dy / 2) - 16;
       elements.push({
         type: "text",
         x: Math.max(10, midX),
         y: Math.max(10, midY),
-        text: conn.label,
+        text: label,
         fontSize: 11,
         strokeColor: "#64748b",
       });
     }
+  };
+
+  connections.forEach((conn) => {
+    const src = findNode(conn.from);
+    const tgt = findNode(conn.to);
+    if (!src || !tgt || src.id === tgt.id) return;
+    renderArrow(src, tgt, conn.label);
   });
+
+  const nodesByColumn = new Map<number, NonNullable<ReturnType<typeof findNode>>[]>();
+  nodes.forEach((n) => {
+    const pos = nodePositions.get(n.id);
+    if (!pos) return;
+    const colList = nodesByColumn.get(pos.column) || [];
+    colList.push(pos);
+    nodesByColumn.set(pos.column, colList);
+  });
+
+  const sortedCols = Array.from(nodesByColumn.keys()).sort((a, b) => a - b);
+  for (let i = 1; i < sortedCols.length; i++) {
+    const prevColNodes = nodesByColumn.get(sortedCols[i - 1]) || [];
+    const currColNodes = nodesByColumn.get(sortedCols[i]) || [];
+
+    if (prevColNodes.length === 0 || currColNodes.length === 0) continue;
+
+    currColNodes.forEach((currNode) => {
+      if ((incomingCounts[currNode.id] || 0) > 0) return;
+
+      const currClean = currNode.id.toLowerCase().replace(/[^a-z0-9]/g, "");
+      let bestSource = prevColNodes.find((p) => {
+        const pClean = p.id.toLowerCase().replace(/[^a-z0-9]/g, "");
+        return (
+          pClean.includes(currClean.replace(/(service|db|database|cache|store)/g, "")) ||
+          currClean.includes(pClean.replace(/(service|db|database|cache|store)/g, ""))
+        );
+      });
+
+      if (!bestSource) {
+        bestSource = prevColNodes.find((p) => {
+          const pLabel = p.label.toLowerCase();
+          return pLabel.includes("gateway") || pLabel.includes("ingress") || pLabel.includes("proxy");
+        });
+      }
+
+      if (!bestSource) {
+        bestSource = prevColNodes[Math.min(currNode.row, prevColNodes.length - 1)];
+      }
+
+      if (bestSource && bestSource.id !== currNode.id) {
+        renderArrow(bestSource, currNode);
+      }
+    });
+  }
 
   if (Array.isArray(groups) && groups.length > 0) {
     const groupElements: ExcalidrawElementStub[] = [];
@@ -555,6 +652,8 @@ DESIGN RULES:
 - Shapes: "rectangle" (default), "diamond" (decisions), "ellipse" (terminals or start/end).
 - Colors: "blue", "purple", "green", "amber", "red", "cyan", "slate", "indigo", "orange", "teal".
 - Return between 8 to 22 nodes depending on complexity.
+- MANDATORY FULL CONNECTIVITY: Every single node MUST be connected with arrows. Connect upstream nodes to downstream nodes (e.g. clients to gateway, gateway to all microservices, each service to its database, queue, or cache). In flowcharts, connect each step sequentially.
+- Use exact node 'id' values in 'from' and 'to'.
 - NO markdown ticks, NO extra text outside the JSON object.`;
     }
 
